@@ -1,0 +1,22 @@
+[package]
+name = "zeroleak-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Ultra-fast, zero-overhead reversible PII & secrets sanitization engine in Rust"
+license = "Apache-2.0"
+authors = ["CreativeUnCommons Team"]
+
+[dependencies]
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+rand = "0.8"
+
+[[bin]]
+name = "zeroleak"
+path = "src/main.rs"
+
+[lib]
+name = "zeroleak"
+path = "src/lib.rs"
