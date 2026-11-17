@@ -83,13 +83,12 @@ impl SessionVault {
         let mut inner = self.inner.write().unwrap();
 
         // 1. Check existing
-        if let Some(session_hashes) = inner.hash_map.get(trace_id) {
-            if let Some(token) = session_hashes.get(&hashed) {
-                if let Some(session_tokens) = inner.token_map.get_mut(trace_id) {
-                    if let Some(entry) = session_tokens.get_mut(token) {
-                        entry.access_count += 1;
-                        return entry.token.clone();
-                    }
+        let existing_token = inner.hash_map.get(trace_id).and_then(|h| h.get(&hashed).cloned());
+        if let Some(token) = existing_token {
+            if let Some(session_tokens) = inner.token_map.get_mut(trace_id) {
+                if let Some(entry) = session_tokens.get_mut(&token) {
+                    entry.access_count += 1;
+                    return entry.token.clone();
                 }
             }
         }
