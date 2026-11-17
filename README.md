@@ -90,7 +90,30 @@ flowchart TD
 
 ---
 
-## 4. Quick-Test & Verification
+## 4. Multi-Language Implementations (Python & Rust)
+
+ZeroLeak is provided in both a zero-dependency Python standard library edition and a high-performance native Rust core:
+
+| Implementation | Location | Dependencies | Latency (p50) | Throughput | Use Case |
+| :--- | :--- | :--- | :---: | :---: | :--- |
+| **`zeroleak-py`** | `zeroleak-py/zeroleak.py` | Pure Python stdlib (0 deps) | $42.4\text{ µs}$ | $\sim 23,500\text{ ops/sec}$ | Standard agent loops, Python gateways, zero-install deployment |
+| **`zeroleak-rs`** | `zeroleak-rs/` | Rust stdlib + serde, sha2, regex | $< 5.0\text{ µs}$ | $\sim 200,000+\text{ ops/sec}$ | High-throughput reverse proxies, edge sidecars, Rust agent runtimes |
+
+### Building and Running the Rust Core
+```bash
+# Build release binary
+cd zeroleak-rs && cargo build --release
+
+# Run interactive masking verification
+./target/release/zeroleak --test "Contact John at john@acme.com with API key sk-live-982138402100000000000000"
+
+# Inspect active detectors & allowlist
+./target/release/zeroleak --list-entities
+```
+
+---
+
+## 5. Quick-Test & Verification
 
 ```bash
 # Developer Quick-Test

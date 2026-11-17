@@ -40,9 +40,24 @@ jobs:
           chmod +x scripts/zeroleak-check
           python scripts/zeroleak-check
 
+  rust-test:
+    name: Rust Core Build & Conformance Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Check Rust Crate
+        run: cd zeroleak-rs && cargo check
+      - name: Build Release Binary
+        run: cd zeroleak-rs && cargo build --release
+
   package-release:
     name: Package Assets & Publish GitHub Release
-    needs: test-zeroleak
+    needs: [test-zeroleak, rust-test]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
