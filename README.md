@@ -22,43 +22,59 @@ Pairs directly with **ZeroMCP**, **HyperGate**, and **AgentTrace** to eliminate 
 
 ## 2. Architecture & Ecosystem Workflow
 
-```
-┌────────────────────────────────────────────────────────┐
-│               User / Client Application               │
-└───────────────────────────┬────────────────────────────┘
-                            │ (Raw Text with PII/Secrets)
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│           PROJECT 4: ZEROLEAK (Pre-Inference)          │
-│ • Detects & Masks PII / Secrets -> [TOKEN_UUID]        │
-│ • Stores Salted Mapping in Ephemeral Memory Vault      │
-└───────────────────────────┬────────────────────────────┘
-                            │ (Sanitized Text Only)
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│            HYPERGATE (System-1 & Routing)              │
-│ • System-1 Routing (90% cheap / 10% reasoning)         │
-│ • Observation / Cost Profiling Mode                    │
-│ • Never sees raw PII                                   │
-└───────────────┬────────────────────────┬───────────────┘
-                │ (LLM Calls)            │ (Tool Invocations)
-                ▼                        ▼
-      [Cloud LLM APIs]         ┌────────────────────────┐
-                               │  ZEROMCP (Tool Servers)│
-                               │  • Tools executed via  │
-                               │    safe ZeroLeak shim  │
-                               └────────┬───────────────┘
-                                        │
-                                        ▼
-┌────────────────────────────────────────────────────────┐
-│          PROJECT 4: ZEROLEAK (Post-Inference)          │
-│ • Restores [TOKEN_UUID] -> Original Values             │
-│ • Emits Sanitized Spans to AGENTTRACE                  │
-└────────────────────────────────────────────────────────┘
+ZeroLeak provides the data protection and privacy boundary in the **CreativeUnCommons** agent architecture suite. Each tool in the ecosystem operates under a strict **Zero-Third-Party-Dependency Mandate** (Python standard library only), **Sub-Millisecond Execution Budgets**, and **Deterministic Correctness**:
+
+```mermaid
+flowchart TD
+    subgraph S1["1. Durability & State Machine"]
+        ZL["⚡ <b>ZeroLoop</b><br/>• Event-Sourced SQLite WAL<br/>• Idempotent Tool Execution<br/>• Deterministic Crash Recovery"]
+    end
+
+    subgraph S2["2. Privacy & Compliance Boundary"]
+        ZLeak["🛡️ <b>ZeroLeak</b> (This Package)<br/>• Sub-50µs Reversible PII Masking<br/>• Ephemeral In-Memory Vault<br/>• Prompt-Injection Firewall"]
+    end
+
+    subgraph S3["3. Context & Cost Routing"]
+        HG["🚪 <b>HyperGate</b><br/>• In-Memory BM25 Tool Pruning (&lt;1ms)<br/>• System-1 Fast Path (90/10 Split)<br/>• Budget Ceiling Circuit-Breaker"]
+    end
+
+    subgraph S4["4. Tool Execution & Wire Protocol"]
+        ZMCP["🔌 <b>ZeroMCP</b><br/>• Raw JSON-RPC 2.0 Stdio/SSE Core<br/>• Content-Addressed Storage (CAS)<br/>• Scoped Capability Delegation"]
+    end
+
+    subgraph S5["5. Universal Observability"]
+        AT["🌲 <b>AgentTrace</b><br/>• W3C Distributed Context (traceparent)<br/>• OpenTelemetry GenAI Semantics<br/>• Sub-ms JSONL / SQLite & OTLP Exporter"]
+    end
+
+    Task["User / Autonomous Task"] --> ZL
+    ZL -->|"Step 1: Ingest State"| ZLeak
+    ZLeak -->|"Step 2: Redacted Safe Prompt"| HG
+    HG -->|"Step 3: Pruned Tool Schemas"| Model["Cloud / Local LLM"]
+    Model -->|"Step 4: Tool Call"| ZMCP
+    ZMCP -->|"Step 5: CAS Output Pointer"| ZLeak
+    ZLeak -->|"Step 6: Restored Data"| ZL
+    ZL -->|"Step 7: Verified Result"| Done["Task Completion"]
+
+    ZL -.->|"State Transitions"| AT
+    ZLeak -.->|"Sanitization Spans"| AT
+    HG -.->|"Token & Cost Metrics"| AT
+    ZMCP -.->|"Tool IPC Spans"| AT
 ```
 
+### Complete Runtime Synergy
+
+| Package | Role in Unified Stack | Standalone Capability | What You Achieve Together |
+| :--- | :--- | :--- | :--- |
+| **[⚡ ZeroLoop](https://github.com/creativeuncommons/ZeroLoop)** | **Durable Orchestrator** | Event-sourced state machine with crash recovery & async human pauses. | Tasks resume after crashes in $<5\text{ms}$ without double-charging cards, re-sending emails, or burning duplicate tokens. |
+| **[🛡️ ZeroLeak](https://github.com/creativeuncommons/ZeroLeak)** | **Privacy Sentinel** *(This Package)* | Sub-$50\text{µs}$ reversible PII & credential redaction with in-memory vaulted restitution. | Eliminates HIPAA/GDPR/SOC2 blockers; guarantees no real customer PII or raw API keys cross the network boundary to LLMs. |
+| **[🚪 HyperGate](https://github.com/creativeuncommons/HyperGate)** | **Inference Router & Tool Pruner** | Sub-millisecond BM25 inverted index tool pruner, System-1 classifier, and budget kill-switch. | Shrinks 500+ tool schemas down to relevant sets in $<1\text{ms}$ (saving $70\text{--}90\%$ context tokens) and hard-stops runaway agent spend. |
+| **[🔌 ZeroMCP](https://github.com/creativeuncommons/ZeroMCP)** | **Tool Protocol & CAS Engine** | Zero-dependency Model Context Protocol (MCP) runtime (stdio/SSE) with CAS storage. | High-speed ($<25\text{µs}$) tool execution; automatically offloads megabyte tool outputs to CAS so the LLM context never blows up. |
+| **[🌲 AgentTrace](https://github.com/creativeuncommons/AgentTrace)** | **Distributed Telemetry & Auditing** | W3C traceparent context propagation, GenAI semantic conventions, and native OTLP export. | Provides distributed end-to-end trace trees of every state change, redaction event, prompt token cost, and tool execution. |
+
+### Ecosystem Integration Points
 * **ZeroMCP Awareness**: Provides a zero-dependency middleware wrapper for ZeroMCP tool handlers (`@protect_mcp_tool`), ensuring tools receive restored parameters locally while external LLMs only see masked tokens.
 * **HyperGate Awareness**: Plugs directly into `HyperGateRouter` as pre-flight / post-flight middleware (`ZeroLeakHyperGateMiddleware`). HyperGate calculates routing tiers and token costs on sanitized text.
+* **ZeroLoop Awareness**: Guarantees that session journals, state snapshots, and idempotency keys created by ZeroLoop store only sanitized, de-identified tokens.
 * **AgentTrace Awareness**: Integrates with `AgentTracer` (`ZeroLeakTraceTelemetry`) to log de-identification telemetry (`pii.masked_count`, `pii.types_detected`, `pii.restituted_count`) without ever logging sensitive plaintext into `.jsonl` or SQLite spans.
 
 ---
