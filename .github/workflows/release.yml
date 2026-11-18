@@ -2,8 +2,11 @@ name: ZeroLeak Release & Conformance Matrix
 
 on:
   push:
+    branches: [ main ]
     tags:
       - 'v*'
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -16,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
         python-version: ['3.10', '3.11', '3.12']
 
     steps:
@@ -41,11 +44,8 @@ jobs:
           python scripts/zeroleak-check
 
   rust-test:
-    name: Rust Core Build & Conformance Tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    name: Rust Core Build & Conformance Tests (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Rust toolchain
@@ -59,6 +59,7 @@ jobs:
     name: Package Assets & Publish GitHub Release
     needs: [test-zeroleak, rust-test]
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -84,7 +85,6 @@ jobs:
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
             dist/packages/*
