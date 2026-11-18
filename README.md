@@ -104,6 +104,7 @@ flowchart TD
    - `mode="enforce"`: Actively tokenizes and restores.
    - `mode="observe"`: Non-destructive staging mode logging compliance advisories on what *would* be masked.
 4. **Ephemeral Vault Safety**: Strict volatile memory per `trace_id` with automatic TTL cleanup (default: 30 minutes). Zero serialization to disk.
+5. **Organization-Specific Custom Entity Rules**: Extensible `CustomEntityRule` engine allowing enterprises to define bespoke PII (e.g. Healthcare MRNs, Internal Financial IDs, proprietary tokens) with custom check-digit validators, entropy thresholds, declarative JSON rule packs, and zero-code environment auto-discovery (`ZEROLEAK_CUSTOM_RULES_PATH`).
 
 ---
 

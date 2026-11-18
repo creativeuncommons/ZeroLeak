@@ -17,6 +17,7 @@ Asserts:
 
 import os
 import sys
+import json
 import time
 import uuid
 import unittest
@@ -35,6 +36,7 @@ if BRIDGES_DIR not in sys.path:
 from zeroleak import (
     ZeroLeak,
     SessionVault,
+    CustomEntityRule,
     luhn_checksum,
     shannon_entropy,
     is_valid_ipv4,
@@ -283,6 +285,198 @@ class TestZeroLeakCore(unittest.TestCase):
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         # Processing 5 dense payloads (total ~20,000 characters) must execute well under 300ms
         self.assertLess(elapsed_ms, 300.0, f"Execution too slow: {elapsed_ms:.2f}ms")
+
+    def test_custom_entity_rule_basic(self):
+        """Tests registration and roundtrip masking of a custom organization rule."""
+        engine = ZeroLeak()
+        # Healthcare Patient Medical Record Number (MRN-XXXX-XXXX)
+        engine.register_custom_rule(
+            CustomEntityRule(
+                name="PATIENT_MRN",
+                pattern=r"\bMRN-\d{4}-\d{4}\b",
+                description="Healthcare Patient Medical Record Number",
+            )
+        )
+
+        text = "Patient records for MRN-8492-1049 and MRN-1122-3344 indicate full recovery."
+        trace = f"trace_mrn_{uuid.uuid4().hex[:6]}"
+        masked = engine.mask(text, trace_id=trace)
+
+        self.assertNotIn("MRN-8492-1049", masked)
+        self.assertNotIn("MRN-1122-3344", masked)
+        self.assertIn("[PATIENT_MRN_1]", masked)
+        self.assertIn("[PATIENT_MRN_2]", masked)
+
+        # Restitute and verify roundtrip fidelity
+        restituted = engine.unmask(masked, trace_id=trace)
+        self.assertEqual(text, restituted)
+
+        # Verify audit receipt
+        receipt = engine.get_audit_receipt(trace)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt.types_detected.get("PATIENT_MRN"), 2)
+
+    def test_custom_entity_rule_validator(self):
+        """Tests that custom validator functions filter invalid candidates."""
+        engine = ZeroLeak()
+        # Custom internal ID where sum of digits must be even
+        def even_sum_validator(val: str) -> bool:
+            digits = [int(c) for c in val if c.isdigit()]
+            return sum(digits) % 2 == 0
+
+        engine.register_custom_rule(
+            CustomEntityRule(
+                name="EVEN_ACCT",
+                pattern=r"\bACCT-\d{4}\b",
+                validator=even_sum_validator,
+            )
+        )
+
+        # ACCT-1111 has sum 4 (even -> valid). ACCT-1112 has sum 5 (odd -> invalid).
+        text = "Valid ACCT-1111 and invalid ACCT-1112 in batch."
+        trace = f"trace_val_{uuid.uuid4().hex[:6]}"
+        masked = engine.mask(text, trace_id=trace)
+
+        self.assertIn("[EVEN_ACCT_1]", masked)
+        self.assertNotIn("ACCT-1111", masked)
+        self.assertIn("ACCT-1112", masked) # Preserved unchanged!
+
+        restituted = engine.unmask(masked, trace_id=trace)
+        self.assertEqual(text, restituted)
+
+    def test_custom_entity_rule_entropy_threshold(self):
+        """Tests that entropy thresholds suppress false positives for repetitive tokens."""
+        engine = ZeroLeak()
+        engine.register_custom_rule(
+            CustomEntityRule(
+                name="ACME_API_TOKEN",
+                pattern=r"\bacme_[a-zA-Z0-9]{16}\b",
+                entropy_threshold=3.2,
+            )
+        )
+
+        # Low entropy repetition vs high entropy pseudo-random key
+        text = "Ignore acme_aaaaaaaaaaaaaaaa but protect acme_xK9qL2mP8vW1zY4j"
+        trace = f"trace_ent_{uuid.uuid4().hex[:6]}"
+        masked = engine.mask(text, trace_id=trace)
+
+        self.assertIn("acme_aaaaaaaaaaaaaaaa", masked)
+        self.assertNotIn("acme_xK9qL2mP8vW1zY4j", masked)
+        self.assertIn("[ACME_API_TOKEN_1]", masked)
+
+        restituted = engine.unmask(masked, trace_id=trace)
+        self.assertEqual(text, restituted)
+
+    def test_custom_entity_priority_resolution(self):
+        """Tests that higher priority custom rules win over lower priority rules."""
+        engine = ZeroLeak()
+        # Low priority generic digits vs high priority specific order ID
+        engine.register_custom_rule(
+            CustomEntityRule(
+                name="INTERNAL_ORDER_ID",
+                pattern=r"\bORD-\d{6}\b",
+                priority=80,
+            )
+        )
+        engine.register_custom_rule(
+            CustomEntityRule(
+                name="GENERIC_ORDER",
+                pattern=r"\bORD-[0-9A-Z]{4,8}\b",
+                priority=20,
+            )
+        )
+
+        text = "Processing invoice ORD-981245 today."
+        trace = f"trace_prio_{uuid.uuid4().hex[:6]}"
+        masked = engine.mask(text, trace_id=trace)
+
+        self.assertIn("[INTERNAL_ORDER_ID_1]", masked)
+        self.assertNotIn("[GENERIC_ORDER_1]", masked)
+
+        restituted = engine.unmask(masked, trace_id=trace)
+        self.assertEqual(text, restituted)
+
+    def test_custom_entity_declarative_json(self):
+        """Tests loading rules from a declarative JSON string or file."""
+        import tempfile
+        rules_json = {
+            "rules": [
+                {
+                    "name": "FIN_SWIFT",
+                    "pattern": r"\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b",
+                    "priority": 75,
+                    "description": "SWIFT Financial BIC Code"
+                },
+                {
+                    "name": "CLINICAL_TRIAL_ID",
+                    "pattern": r"\bNCT\d{8}\b",
+                    "priority": 60,
+                    "description": "ClinicalTrials.gov ID"
+                }
+            ]
+        }
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+            json.dump(rules_json, tf)
+            tf_path = tf.name
+
+        try:
+            engine = ZeroLeak()
+            engine.register_rules_from_json(tf_path)
+
+            text = "Check SWIFT DEUTDEDBFXX and trial NCT04280705 status."
+            trace = f"trace_json_{uuid.uuid4().hex[:6]}"
+            masked = engine.mask(text, trace_id=trace)
+
+            self.assertIn("[FIN_SWIFT_1]", masked)
+            self.assertIn("[CLINICAL_TRIAL_ID_1]", masked)
+
+            restituted = engine.unmask(masked, trace_id=trace)
+            self.assertEqual(text, restituted)
+        finally:
+            if os.path.exists(tf_path):
+                os.remove(tf_path)
+
+    def test_custom_entity_env_var_autoload(self):
+        """Tests automatic rule discovery from ZEROLEAK_CUSTOM_RULES_PATH."""
+        import tempfile
+        rules_json = {
+            "rules": [
+                {
+                    "name": "CORP_BADGE_ID",
+                    "pattern": r"\bBDG-[0-9]{5}\b",
+                    "priority": 65
+                }
+            ]
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+            json.dump(rules_json, tf)
+            tf_path = tf.name
+
+        old_env = os.environ.get("ZEROLEAK_CUSTOM_RULES_PATH")
+        os.environ["ZEROLEAK_CUSTOM_RULES_PATH"] = tf_path
+        try:
+            engine = ZeroLeak()
+            self.assertIn("CORP_BADGE_ID", [r.name for r in engine.get_custom_rules()])
+            text = "Access granted to BDG-49201."
+            masked = engine.mask(text)
+            self.assertIn("[CORP_BADGE_ID_1]", masked)
+        finally:
+            if old_env is None:
+                os.environ.pop("ZEROLEAK_CUSTOM_RULES_PATH", None)
+            else:
+                os.environ["ZEROLEAK_CUSTOM_RULES_PATH"] = old_env
+            if os.path.exists(tf_path):
+                os.remove(tf_path)
+
+    def test_custom_entity_name_validation(self):
+        """Tests that invalid entity names are rejected with clear ValueErrors."""
+        with self.assertRaises(ValueError):
+            CustomEntityRule(name="invalid-hyphen-name", pattern=r"\d+")
+        with self.assertRaises(ValueError):
+            CustomEntityRule(name="TOOLONGNAME_EXCEEDING_THIRTY_TWO_CHARACTERS_HERE", pattern=r"\d+")
+        with self.assertRaises(ValueError):
+            CustomEntityRule(name="", pattern=r"\d+")
 
 
 if __name__ == "__main__":

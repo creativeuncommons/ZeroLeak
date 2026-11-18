@@ -32,6 +32,12 @@
 * `mode="enforce"`: Actively replaces detected entities with deterministic synthetic tokens and enables restitution.
 * `mode="observe"`: Preserves input prompts identically while producing dry-run compliance advisories detailing what entities were detected.
 
+### Invariant 5: Enterprise Sensitivity Extensibility
+* Organizations may register novel or enterprise-specific sensitivity rules (`CustomEntityRule`) without modifying core codebase files.
+* Custom entity types generate standardized synthetic tokens: `[{CUSTOM_TYPE}_{COUNTER}]` matching `^\[[A-Z0-9_]{1,32}_\d{1,9}\]$`.
+* Resolution priority guarantees that high-priority custom organizational rules (default: 50) take precedence over overlapping lower-priority generic detectors (default: 10).
+* Custom rules support algorithmic validators (`Callable[[str], bool]`), minimum Shannon entropy thresholds ($H \ge \text{threshold}$), declarative JSON loading, and zero-code environment auto-discovery (`ZEROLEAK_CUSTOM_RULES_PATH`).
+
 ---
 
 ## 3. Protocol & Data Schemas
@@ -49,6 +55,7 @@ Synthetic tokens use deterministic, type-aware synthetic strings:
 * `[API_KEY_1]`
 * `[JWT_1]`
 * `[CRYPTO_KEY_1]`
+* `[PATIENT_MRN_1]`, `[INTERNAL_TRADE_ID_1]` (Custom Organizational Entities)
 
 Co-reference invariant: When the same raw entity appears multiple times within a session (`trace_id`), it resolves to the exact same synthetic token, preserving coreference for LLM reasoning.
 
@@ -62,7 +69,7 @@ Co-reference invariant: When the same raw entity appears multiple times within a
   "types_detected": {
     "EMAIL": 1,
     "API_KEY": 1,
-    "PHONE": 1
+    "PATIENT_MRN": 1
   },
   "advisories": [],
   "duration_ms": 0.12,
@@ -70,6 +77,37 @@ Co-reference invariant: When the same raw entity appears multiple times within a
   "timestamp": "2026-11-11T16:15:41Z"
 }
 ```
+
+### 3.3 Custom Entity Rule Schema (`CustomEntityRule`)
+
+```json
+{
+  "rules": [
+    {
+      "name": "PATIENT_MRN",
+      "pattern": "\\bMRN-[0-9]{4}-[0-9]{4}\\b",
+      "validator": null,
+      "entropy_threshold": null,
+      "priority": 70,
+      "description": "Hospital medical record number"
+    },
+    {
+      "name": "ACME_ACCESS_TOKEN",
+      "pattern": "\\bacme_live_[0-9a-zA-Z]{24,40}\\b",
+      "validator": null,
+      "entropy_threshold": 3.2,
+      "priority": 80,
+      "description": "Proprietary internal API token"
+    }
+  ]
+}
+```
+
+#### Rule Resolution Semantics
+1. **Candidate Match Collection**: Scans text against all active built-in patterns (priority 10) and registered custom rules (priority `rule.priority`).
+2. **Filtering**: Discards matches matching allowlists, failing custom validators (`validator(val) == False`), or failing minimum Shannon entropy requirements (`shannon_entropy(val) < threshold`).
+3. **Priority Overlap Scheduling**: Candidate intervals are evaluated in descending order of `(priority, start_index, length)`. The highest priority span claims its character interval `[start, end)`. Any lower-priority or overlapping candidate intersecting an occupied span is strictly discarded.
+4. **Deterministic Token Assignment**: Claimed spans are sorted in text stream order and replaced with vaulted synthetic tokens.
 
 ---
 

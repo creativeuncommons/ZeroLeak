@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, List, Optional, Tuple, Set, Union, Callable
 
 _TRACE_ID_CTX: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("zeroleak_trace_id", default=None)
-_TOKEN_RE = re.compile(r"\[[A-Z_]{1,32}_\d{1,9}\]")
+_TOKEN_RE = re.compile(r"\[[A-Z0-9_]{1,32}_\d{1,9}\]")
 _MAX_SCAN_CHARS = 2_000_000
 
 def take_bounded_slice(payload: str, max_chars: int = _MAX_SCAN_CHARS) -> str:
@@ -48,6 +48,7 @@ ENV_MODE = "ZEROLEAK_MODE"                   # 'enforce' | 'observe'
 ENV_ENTITIES = "ZEROLEAK_ENTITIES"           # Comma-separated list of entities
 ENV_ALLOWLIST = "ZEROLEAK_ALLOWLIST"         # Comma-separated list of allowed domains/keys
 ENV_VAULT_TTL = "ZEROLEAK_VAULT_TTL_SECONDS" # Default 1800 (30 minutes)
+ENV_CUSTOM_RULES_PATH = "ZEROLEAK_CUSTOM_RULES_PATH" # Optional JSON path to enterprise rule definitions
 
 DEFAULT_ENTITIES = [
     "EMAIL",
@@ -124,6 +125,89 @@ def is_valid_ipv4(ip_str: str) -> bool:
         if len(p) > 1 and p[0] == "0":
             return False
     return True
+
+
+# -----------------------------------------------------------------------------
+# Organization-Specific & Custom Entity Rules
+# -----------------------------------------------------------------------------
+
+@dataclass
+class CustomEntityRule:
+    """
+    Organization-specific sensitive entity detection rule.
+    Allows enterprises to define custom PII, internal IDs, proprietary tokens,
+    or novel sensitive formats with optional validator callables and entropy thresholds.
+    """
+    name: str
+    pattern: Union[str, re.Pattern]
+    validator: Optional[Callable[[str], bool]] = None
+    entropy_threshold: Optional[float] = None
+    priority: int = 50
+    description: str = ""
+
+    def __post_init__(self):
+        cleaned_name = str(self.name).strip().upper()
+        if not re.match(r"^[A-Z0-9_]{1,32}$", cleaned_name):
+            raise ValueError(
+                f"Custom entity name '{self.name}' must be 1-32 uppercase alphanumeric/underscore characters (matching ^[A-Z0-9_]{{1,32}}$)."
+            )
+        self.name = cleaned_name
+
+        if isinstance(self.pattern, str):
+            try:
+                self._compiled_re: re.Pattern = re.compile(self.pattern)
+            except re.error as e:
+                raise ValueError(f"Invalid regex pattern for custom entity rule '{self.name}': {e}")
+        elif isinstance(self.pattern, re.Pattern):
+            self._compiled_re = self.pattern
+        else:
+            raise TypeError(f"Rule pattern must be str or re.Pattern, got {type(self.pattern).__name__}")
+
+        if self.entropy_threshold is not None:
+            self.entropy_threshold = float(self.entropy_threshold)
+
+        self.priority = int(self.priority)
+        self.description = str(self.description or "")
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CustomEntityRule":
+        """Instantiates a CustomEntityRule from a dictionary specification."""
+        name = data.get("name")
+        pattern = data.get("pattern")
+        if not name or not pattern:
+            raise ValueError("Custom entity rule dictionary must provide 'name' and 'pattern'")
+
+        val_spec = data.get("validator")
+        validator_func: Optional[Callable[[str], bool]] = None
+        if callable(val_spec):
+            validator_func = val_spec
+        elif isinstance(val_spec, str):
+            val_lower = val_spec.strip().lower()
+            if val_lower == "luhn":
+                validator_func = luhn_checksum
+            elif val_lower in ("ipv4", "ip"):
+                validator_func = is_valid_ipv4
+            else:
+                raise ValueError(f"Unknown built-in validator name '{val_spec}'. Known validators: 'luhn', 'ipv4'.")
+
+        return cls(
+            name=str(name),
+            pattern=pattern,
+            validator=validator_func,
+            entropy_threshold=data.get("entropy_threshold"),
+            priority=data.get("priority", 50),
+            description=data.get("description", ""),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serializes rule to a clean JSON-serializable dictionary."""
+        return {
+            "name": self.name,
+            "pattern": self._compiled_re.pattern,
+            "entropy_threshold": self.entropy_threshold,
+            "priority": self.priority,
+            "description": self.description,
+        }
 
 
 # -----------------------------------------------------------------------------
@@ -401,6 +485,7 @@ class ZeroLeak:
         enabled_entities: Optional[List[str]] = None,
         allowlist: Optional[List[str]] = None,
         vault_ttl_seconds: Optional[int] = None,
+        custom_rules: Optional[List[Union[CustomEntityRule, Dict[str, Any]]]] = None,
     ):
         self.mode = mode or os.getenv(ENV_MODE, "enforce").strip().lower()
         if self.mode not in ("enforce", "observe"):
@@ -433,6 +518,81 @@ class ZeroLeak:
         self._receipts: collections.OrderedDict[str, AuditReceipt] = collections.OrderedDict()
         self._lock = threading.RLock()
 
+        # Custom organizational rules: name -> CustomEntityRule
+        self._custom_rules: Dict[str, CustomEntityRule] = {}
+        if custom_rules:
+            for r in custom_rules:
+                self.register_custom_rule(r)
+
+        env_custom_rules_path = os.getenv(ENV_CUSTOM_RULES_PATH)
+        if env_custom_rules_path and os.path.isfile(env_custom_rules_path):
+            self.register_rules_from_json(env_custom_rules_path)
+
+    def register_custom_rule(self, rule: Union[CustomEntityRule, Dict[str, Any]]) -> "ZeroLeak":
+        """
+        Registers an organization-specific entity rule.
+        Accepts either a CustomEntityRule instance or a dictionary specification.
+        Automatically enables the custom entity name in the active detection set.
+        """
+        if isinstance(rule, dict):
+            rule_obj = CustomEntityRule.from_dict(rule)
+        elif isinstance(rule, CustomEntityRule):
+            rule_obj = rule
+        else:
+            raise TypeError(f"Expected CustomEntityRule or dict, got {type(rule).__name__}")
+
+        with self._lock:
+            self._custom_rules[rule_obj.name] = rule_obj
+            self.enabled_entities.add(rule_obj.name)
+        return self
+
+    def register_rules_from_dict(self, rules_data: Union[List[Dict[str, Any]], Dict[str, Any]]) -> "ZeroLeak":
+        """
+        Batch registers custom rules from a list of dicts or a mapping structure.
+        Supports {"rules": [...]} or [{"name": ...}] or {"NAME": {"pattern": ...}}.
+        """
+        items: List[Dict[str, Any]] = []
+        if isinstance(rules_data, dict):
+            if "rules" in rules_data and isinstance(rules_data["rules"], list):
+                items = rules_data["rules"]
+            else:
+                for k, v in rules_data.items():
+                    if isinstance(v, dict):
+                        d = dict(v)
+                        d.setdefault("name", k)
+                        items.append(d)
+        elif isinstance(rules_data, list):
+            items = rules_data
+        else:
+            raise TypeError("rules_data must be a list of rule dicts or a dictionary")
+
+        for item in items:
+            self.register_custom_rule(item)
+        return self
+
+    def register_rules_from_json(self, json_str_or_filepath: str) -> "ZeroLeak":
+        """Loads and registers custom entity rules from a JSON file path or raw JSON string."""
+        path_str = str(json_str_or_filepath)
+        if os.path.isfile(path_str):
+            with open(path_str, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            data = json.loads(path_str)
+        return self.register_rules_from_dict(data)
+
+    def unregister_custom_rule(self, name: str) -> bool:
+        """Removes a custom entity rule by name."""
+        cleaned = str(name).strip().upper()
+        with self._lock:
+            removed = self._custom_rules.pop(cleaned, None) is not None
+            self.enabled_entities.discard(cleaned)
+            return removed
+
+    def get_custom_rules(self) -> List[CustomEntityRule]:
+        """Returns a snapshot list of currently registered custom rules."""
+        with self._lock:
+            return list(self._custom_rules.values())
+
     def _record_receipt(self, trace_id: str, receipt: AuditReceipt):
         with self._lock:
             if trace_id in self._receipts:
@@ -457,31 +617,33 @@ class ZeroLeak:
 
     def scan_entities(self, text: str) -> List[Tuple[int, int, str, str]]:
         """
-        Scans text for sensitive entities using compiled regexes, Luhn, and Shannon entropy.
-        Returns a list of (start_idx, end_idx, entity_type, raw_value).
+        Scans text for sensitive entities using compiled regexes, Luhn, Shannon entropy,
+        and custom organizational rules.
+        Returns a sorted list of non-overlapping (start_idx, end_idx, entity_type, raw_value).
         """
-        matches: List[Tuple[int, int, str, str]] = []
+        candidates: List[Tuple[int, int, str, str, int]] = []
+        BUILTIN_PRIO = 10
 
         # 1. EMAIL
         if "EMAIL" in self.enabled_entities:
             for m in PATTERNS["EMAIL"].finditer(text):
                 val = m.group(0)
                 if not self.is_allowed(val, "EMAIL"):
-                    matches.append((m.start(), m.end(), "EMAIL", val))
+                    candidates.append((m.start(), m.end(), "EMAIL", val, BUILTIN_PRIO))
 
         # 2. PHONE_US
         if "PHONE_US" in self.enabled_entities:
             for m in PATTERNS["PHONE_US"].finditer(text):
                 val = m.group(0)
                 if not self.is_allowed(val, "PHONE"):
-                    matches.append((m.start(), m.end(), "PHONE", val))
+                    candidates.append((m.start(), m.end(), "PHONE", val, BUILTIN_PRIO))
 
         # 3. SSN
         if "SSN" in self.enabled_entities:
             for m in PATTERNS["SSN"].finditer(text):
                 val = m.group(0)
                 if not self.is_allowed(val, "SSN"):
-                    matches.append((m.start(), m.end(), "SSN", val))
+                    candidates.append((m.start(), m.end(), "SSN", val, BUILTIN_PRIO))
 
         # 4. CREDIT_CARD (Validated by Luhn algorithm)
         if "CREDIT_CARD" in self.enabled_entities:
@@ -490,7 +652,7 @@ class ZeroLeak:
                 digits = re.sub(r"\D", "", val)
                 if 13 <= len(digits) <= 19 and luhn_checksum(digits):
                     if not self.is_allowed(val, "CREDIT_CARD"):
-                        matches.append((m.start(), m.end(), "CREDIT_CARD", val))
+                        candidates.append((m.start(), m.end(), "CREDIT_CARD", val, BUILTIN_PRIO))
 
         # 5. IP_ADDRESS
         if "IP_ADDRESS" in self.enabled_entities:
@@ -500,58 +662,81 @@ class ZeroLeak:
                     # For IPv4, verify octets <= 255
                     if "." in val and not is_valid_ipv4(val):
                         continue
-                    matches.append((m.start(), m.end(), "IP_ADDRESS", val))
+                    candidates.append((m.start(), m.end(), "IP_ADDRESS", val, BUILTIN_PRIO))
 
         # 6. KNOWN API KEYS
         if "API_KEY_HIGH_ENTROPY" in self.enabled_entities:
             for m in PATTERNS["API_KEY_KNOWN"].finditer(text):
                 val = m.group(0)
                 if not self.is_allowed(val, "API_KEY"):
-                    matches.append((m.start(), m.end(), "API_KEY", val))
+                    candidates.append((m.start(), m.end(), "API_KEY", val, BUILTIN_PRIO))
 
         # 7. BEARER TOKENS
         if "BEARER_TOKEN" in self.enabled_entities:
             for m in PATTERNS["BEARER_TOKEN"].finditer(text):
-                # group(1) is the token itself
                 val = m.group(1)
                 if len(val) >= 16 and not self.is_allowed(val, "BEARER_TOKEN"):
-                    matches.append((m.start(1), m.end(1), "BEARER_TOKEN", val))
+                    candidates.append((m.start(1), m.end(1), "BEARER_TOKEN", val, BUILTIN_PRIO))
 
         # 8. JWT
         if "JWT" in self.enabled_entities:
             for m in PATTERNS["JWT"].finditer(text):
                 val = m.group(0)
                 if not self.is_allowed(val, "JWT"):
-                    matches.append((m.start(), m.end(), "JWT", val))
+                    candidates.append((m.start(), m.end(), "JWT", val, BUILTIN_PRIO))
 
         # 9. CRYPTO WALLET
         if "CRYPTO_WALLET" in self.enabled_entities:
             for m in PATTERNS["CRYPTO_WALLET"].finditer(text):
                 val = m.group(0)
                 if not self.is_allowed(val, "CRYPTO_KEY"):
-                    matches.append((m.start(), m.end(), "CRYPTO_KEY", val))
+                    candidates.append((m.start(), m.end(), "CRYPTO_KEY", val, BUILTIN_PRIO))
 
         # 10. GENERIC HIGH-ENTROPY SECRETS
         if "API_KEY_HIGH_ENTROPY" in self.enabled_entities:
             for m in PATTERNS["GENERIC_SECRET_CANDIDATE"].finditer(text):
                 val = m.group(0)
-                # Avoid standard English words or short UUID blocks
                 if len(val) >= 30 and not self.is_allowed(val, "API_KEY"):
                     entropy = shannon_entropy(val)
                     if entropy >= 3.3:
-                        # Verify we haven't already captured this range
-                        matches.append((m.start(), m.end(), "API_KEY", val))
+                        candidates.append((m.start(), m.end(), "API_KEY", val, BUILTIN_PRIO))
 
-        # Deduplicate and sort matches: prioritize longer matches on overlap
-        matches.sort(key=lambda x: (x[0], -(x[1] - x[0])))
-        filtered_matches: List[Tuple[int, int, str, str]] = []
-        last_end = -1
-        for start, end, etype, val in matches:
-            if start >= last_end:
-                filtered_matches.append((start, end, etype, val))
-                last_end = end
+        # 11. Custom Organizational & Novel Rules
+        with self._lock:
+            custom_rules_snapshot = list(self._custom_rules.values())
 
-        return filtered_matches
+        for rule in custom_rules_snapshot:
+            if rule.name not in self.enabled_entities:
+                continue
+            for m in rule._compiled_re.finditer(text):
+                val = m.group(0)
+                if not val or self.is_allowed(val, rule.name):
+                    continue
+                # Optional programmatic validator callback
+                if rule.validator and not rule.validator(val):
+                    continue
+                # Optional Shannon entropy check
+                if rule.entropy_threshold is not None:
+                    if shannon_entropy(val) < rule.entropy_threshold:
+                        continue
+                candidates.append((m.start(), m.end(), rule.name, val, rule.priority))
+
+        # Sort candidates: higher priority first, then earlier start, then longer match
+        candidates.sort(key=lambda x: (-x[4], x[0], -(x[1] - x[0])))
+
+        # Greedy non-overlapping interval selection by priority
+        selected: List[Tuple[int, int, str, str]] = []
+        occupied_spans: List[Tuple[int, int]] = []
+
+        for start, end, etype, val, prio in candidates:
+            # Check overlap with any already occupied span
+            if not any(max(start, occ_s) < min(end, occ_e) for occ_s, occ_e in occupied_spans):
+                selected.append((start, end, etype, val))
+                occupied_spans.append((start, end))
+
+        # Re-sort selected matches in text stream order
+        selected.sort(key=lambda x: x[0])
+        return selected
 
     def mask(self, text: str, trace_id: Optional[str] = None) -> str:
         """
@@ -796,6 +981,18 @@ def protect_tool(handler: Callable[..., Any]) -> Callable[..., Any]:
 def print_audit_receipt(trace_id: str):
     default_engine.print_audit_receipt(trace_id)
 
+def register_custom_rule(rule: Union[CustomEntityRule, Dict[str, Any]]) -> ZeroLeak:
+    return default_engine.register_custom_rule(rule)
+
+def register_rules_from_dict(rules_data: Union[List[Dict[str, Any]], Dict[str, Any]]) -> ZeroLeak:
+    return default_engine.register_rules_from_dict(rules_data)
+
+def register_rules_from_json(json_str_or_filepath: str) -> ZeroLeak:
+    return default_engine.register_rules_from_json(json_str_or_filepath)
+
+def get_custom_rules() -> List[CustomEntityRule]:
+    return default_engine.get_custom_rules()
+
 
 # -----------------------------------------------------------------------------
 # Developer Ergonomics & CLI Quick-Test
@@ -807,6 +1004,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--test", type=str, help="Quick-test string with PII/secrets to mask and restitute")
     parser.add_argument("--mode", choices=["enforce", "observe"], default=None, help="Execution mode")
+    parser.add_argument("--custom-rules-file", type=str, help="Path to JSON file with custom organizational entity rules")
     parser.add_argument("--list-entities", action="store_true", help="List all supported entity detectors")
     parser.add_argument("--print-config", action="store_true", help="Print active configuration & environment bindings")
     parser.add_argument("--firewall-test", type=str, help="Test prompt-injection firewall on untrusted input")
@@ -818,11 +1016,19 @@ def main():
     args = parser.parse_args()
 
     engine = ZeroLeak(mode=args.mode) if args.mode else default_engine
+    if args.custom_rules_file:
+        engine.register_rules_from_json(args.custom_rules_file)
 
     if args.list_entities:
-        print("\nSupported ZeroLeak Entity Detectors:")
+        print("\nSupported ZeroLeak Built-in Detectors:")
         for entity in DEFAULT_ENTITIES:
             print(f"  • {entity}")
+        customs = engine.get_custom_rules()
+        if customs:
+            print("\nRegistered Custom Organizational Rules:")
+            for cr in customs:
+                desc = f" ({cr.description})" if cr.description else ""
+                print(f"  • {cr.name} [priority={cr.priority}]{desc}")
         print("\nDefault Allowlist:")
         for allow in DEFAULT_ALLOWLIST:
             print(f"  • {allow}")
@@ -833,6 +1039,7 @@ def main():
         print(f"  • Version:         {__version__}")
         print(f"  • Mode:            {engine.mode}")
         print(f"  • Active Entities: {', '.join(sorted(engine.enabled_entities))}")
+        print(f"  • Custom Rules:    {len(engine.get_custom_rules())}")
         print(f"  • Allowlist Count: {len(engine.allowlist)}")
         print(f"  • Vault TTL:       {engine.vault.default_ttl}s")
         print(f"  • Ephemeral Vault: {engine.vault}")

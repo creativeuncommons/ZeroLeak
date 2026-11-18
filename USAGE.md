@@ -81,6 +81,117 @@ restored = engine.unmask_object(masked_params, trace_id=trace_id)
 assert restored == params
 ```
 
+### 2.3 Organization-Specific Custom Entity Rules (`CustomEntityRule`)
+
+Enterprises frequently need to redact internal or novel sensitive entities (e.g. Healthcare Medical Record Numbers, FinTech transaction identifiers, proprietary tokens, national IDs) that are not covered by generic regex suites.
+
+ZeroLeak provides a first-class, zero-dependency custom rule framework supporting programmatic registration, optional checksum validators, Shannon entropy thresholds, priority-based overlap resolution, declarative JSON rule packs, and environment auto-discovery:
+
+#### Programmatic Python Registration
+
+```python
+from zeroleak import ZeroLeak, CustomEntityRule
+
+engine = ZeroLeak()
+
+# 1. Healthcare: Patient Medical Record Number (MRN-XXXX-XXXX)
+engine.register_custom_rule(
+    CustomEntityRule(
+        name="PATIENT_MRN",
+        pattern=r"\bMRN-[0-9]{4}-[0-9]{4}\b",
+        priority=70,  # Higher priority evaluated before generic numbers
+        description="Hospital patient medical record identifier"
+    )
+)
+
+# 2. Proprietary High-Entropy Token with Shannon Entropy Filtering
+engine.register_custom_rule(
+    CustomEntityRule(
+        name="ACME_VAULT_KEY",
+        pattern=r"\bacme_sec_[A-Za-z0-9]{24,48}\b",
+        entropy_threshold=3.2,  # Suppresses low-entropy test keys like acme_sec_aaaaaaaa...
+        priority=80,
+        description="Internal Acme production vault credentials"
+    )
+)
+
+# 3. Custom Checksum / Validator Function
+def valid_mod11_id(val: str) -> bool:
+    digits = [int(c) for c in val if c.isdigit()]
+    return sum(d * (i + 1) for i, d in enumerate(digits)) % 11 == 0
+
+engine.register_custom_rule(
+    CustomEntityRule(
+        name="EMPLOYEE_ID",
+        pattern=r"\bEMP-[0-9]{6}\b",
+        validator=valid_mod11_id,
+        priority=60,
+        description="Employee badge ID with Mod-11 check-digit"
+    )
+)
+
+# Execution
+text = "Patient MRN-8492-1049 assigned key acme_sec_xK9qL2mP8vW1zY4j7bN3 and badge EMP-123456."
+masked = engine.mask(text, trace_id="session_custom")
+print(masked)
+# Output: "Patient [PATIENT_MRN_1] assigned key [ACME_VAULT_KEY_1] and badge [EMPLOYEE_ID_1]."
+
+# 100% Roundtrip Unmasking
+restituted = engine.unmask(masked, trace_id="session_custom")
+assert restituted == text
+```
+
+#### Declarative JSON Rule Packs
+
+Organizations can maintain canonical sensitivity rule catalogs in version-controlled JSON files:
+
+```json
+{
+  "rules": [
+    {
+      "name": "PATIENT_MRN",
+      "pattern": "\\bMRN-[0-9]{4}-[0-9]{4}\\b",
+      "priority": 70,
+      "description": "Hospital medical record number"
+    },
+    {
+      "name": "INTERNAL_TRADE_ID",
+      "pattern": "\\bTRD-[A-Z]{3}-[0-9]{6}\\b",
+      "priority": 75,
+      "description": "Proprietary trade execution order ID"
+    },
+    {
+      "name": "ACME_ACCESS_TOKEN",
+      "pattern": "\\bacme_live_[0-9a-zA-Z]{24,40}\\b",
+      "entropy_threshold": 3.2,
+      "priority": 80,
+      "description": "Internal organization API token"
+    }
+  ]
+}
+```
+
+Load directly via Python:
+```python
+engine = ZeroLeak()
+engine.register_rules_from_json("/path/to/custom_rules.json")
+```
+
+Or via CLI:
+```bash
+python3 zeroleak-py/zeroleak.py --custom-rules-file ./custom_rules.json --test "MRN-1234-5678"
+```
+
+#### Environment Auto-Discovery
+
+Set the `ZEROLEAK_CUSTOM_RULES_PATH` environment variable in container or agent environments:
+
+```bash
+export ZEROLEAK_CUSTOM_RULES_PATH="/etc/zeroleak/enterprise_rules.json"
+```
+
+Every instantiated `ZeroLeak()` engine automatically ingests and validates the rules without requiring code changes.
+
 ---
 
 ## 3. Ecosystem Bridges
@@ -141,6 +252,7 @@ ZeroLeakTraceTelemetry.record_to_span(active_span, trace_id=trace_id)
 | `ZEROLEAK_ENTITIES` | Comma-separated | All | Subset of active detectors (`EMAIL,PHONE_US,SSN,CREDIT_CARD,IP_ADDRESS,API_KEY_HIGH_ENTROPY,BEARER_TOKEN,JWT,CRYPTO_WALLET`). |
 | `ZEROLEAK_ALLOWLIST` | Comma-separated | Defaults | Allowed domains/hosts that should never be masked (e.g. `localhost,example.com`). |
 | `ZEROLEAK_VAULT_TTL_SECONDS` | Integer | `1800` | Ephemeral in-memory session lifetime before auto-eviction (30 min). |
+| `ZEROLEAK_CUSTOM_RULES_PATH` | File path | `None` | Path to declarative JSON rule pack containing organization-specific entity definitions. |
 
 ---
 
