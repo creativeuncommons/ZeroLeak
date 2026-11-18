@@ -33,7 +33,7 @@ ZEROLEAK_PY = os.path.join(PROJECT_ROOT, "zeroleak-py", "zeroleak.py")
 STD_MODULES = {
     "os", "sys", "re", "json", "time", "math", "uuid", "secrets", "hashlib",
     "threading", "argparse", "collections", "dataclasses", "typing", "datetime",
-    "contextlib", "functools", "copy", "unittest", "contextvars", "inspect"
+    "contextlib", "functools", "copy", "unittest", "contextvars", "inspect", "bisect"
 }
 
 def audit_dependencies(verbose=False):

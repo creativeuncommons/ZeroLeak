@@ -27,6 +27,7 @@ import collections
 import contextvars
 import functools
 import inspect
+import bisect
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, List, Optional, Tuple, Set, Union, Callable
 
@@ -318,7 +319,7 @@ class SessionVault:
     Zero disk serialization. Auto-expiring sliding TTL per session.
     """
     MAX_SESSIONS = 10_000
-    MAX_ENTRIES_PER_SESSION = 5_000
+    MAX_ENTRIES_PER_SESSION = int(os.getenv("ZEROLEAK_MAX_ENTRIES", "50000"))
 
     def __init__(self, default_ttl_seconds: int = 1800):
         self.default_ttl = max(1, int(default_ttl_seconds))
@@ -724,15 +725,21 @@ class ZeroLeak:
         # Sort candidates: higher priority first, then earlier start, then longer match
         candidates.sort(key=lambda x: (-x[4], x[0], -(x[1] - x[0])))
 
-        # Greedy non-overlapping interval selection by priority
+        # Fast non-overlapping interval selection by priority via bisect search O(M log M)
         selected: List[Tuple[int, int, str, str]] = []
         occupied_spans: List[Tuple[int, int]] = []
 
         for start, end, etype, val, prio in candidates:
-            # Check overlap with any already occupied span
-            if not any(max(start, occ_s) < min(end, occ_e) for occ_s, occ_e in occupied_spans):
+            idx = bisect.bisect_right(occupied_spans, (start, float("inf")))
+            overlaps = False
+            if idx > 0 and occupied_spans[idx - 1][1] > start:
+                overlaps = True
+            elif idx < len(occupied_spans) and occupied_spans[idx][0] < end:
+                overlaps = True
+
+            if not overlaps:
                 selected.append((start, end, etype, val))
-                occupied_spans.append((start, end))
+                bisect.insort(occupied_spans, (start, end))
 
         # Re-sort selected matches in text stream order
         selected.sort(key=lambda x: x[0])
