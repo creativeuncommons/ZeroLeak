@@ -5,6 +5,12 @@
   <b>Ultra-Fast • Pure Standard Library • Reversible De-Identification • In-Memory Ephemeral Vault • ReDoS-Immune</b>
 </p>
 
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+  <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/Dependencies-Zero%20(Pure%20Stdlib)-brightgreen.svg" alt="Dependencies: Zero">
+</p>
+
 ---
 
 ## 1. Mission Statement
