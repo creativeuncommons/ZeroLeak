@@ -605,10 +605,19 @@ class ZeroLeak:
     def _record_receipt(self, trace_id: str, receipt: AuditReceipt):
         with self._lock:
             if trace_id in self._receipts:
+                old = self._receipts[trace_id]
+                old.masked_count += receipt.masked_count
+                old.restituted_count += receipt.restituted_count
+                old.duration_ms += receipt.duration_ms
+                for k, v in receipt.types_detected.items():
+                    old.types_detected[k] = old.types_detected.get(k, 0) + v
+                if receipt.advisories:
+                    old.advisories.extend(receipt.advisories)
                 self._receipts.move_to_end(trace_id)
-            self._receipts[trace_id] = receipt
-            if len(self._receipts) > self.MAX_RECEIPTS:
-                self._receipts.popitem(last=False)
+            else:
+                self._receipts[trace_id] = receipt
+                if len(self._receipts) > self.MAX_RECEIPTS:
+                    self._receipts.popitem(last=False)
 
     def is_allowed(self, value: str, entity_type: str = "") -> bool:
         """Checks whether an entity value matches an item in the allowlist (fail-closed for credentials)."""
