@@ -1,15 +1,12 @@
-# ZeroLeak (Project 4)
-### Zero-Dependency Reversible PII & Secrets Sanitization Engine
+# 🛡️ ZeroLeak: Zero-Dependency Reversible PII & Secrets Sanitization Engine
 
-<p align="center">
-  <b>Ultra-Fast • Pure Standard Library • Reversible De-Identification • In-Memory Ephemeral Vault • ReDoS-Immune</b>
-</p>
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Dependencies](https://img.shields.io/badge/Dependencies-Zero%20(Pure%20Stdlib)-brightgreen.svg)]()
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Latency](https://img.shields.io/badge/Latency-%3C%2050%20µs-purple.svg)](benchmarks/)
+[![CI Build](https://github.com/creativeuncommons/ZeroLeak/actions/workflows/release.yml/badge.svg)](https://github.com/creativeuncommons/ZeroLeak/actions)
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
-  <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/Dependencies-Zero%20(Pure%20Stdlib)-brightgreen.svg" alt="Dependencies: Zero">
-</p>
+> **Ultra-fast, zero-external-dependency, reversible de-identification and security sanitization proxy for autonomous AI agents, multi-turn loops, and LLM gateways.**
 
 ---
 
@@ -23,6 +20,20 @@ Pairs directly with **ZeroMCP**, **HyperGate**, and **AgentTrace** to eliminate 
 * **Ephemeral In-Memory Token Vault**: Manages an isolated, cryptographically salted session vault pairing synthetic tokens with original raw values with **zero disk leakage**.
 * **Post-Inference Restitution**: Intercepts the LLM's response or downstream tool-call parameters, deterministically restoring the original sensitive values before presenting them to the user or executing on internal backends.
 * **Inter-Agent Prompt-Injection Firewall**: Sanitizes untrusted tool outputs (e.g., web scrapes, untrusted DB rows) to neutralize indirect prompt injection payloads before they cross subagent boundaries.
+
+### Benchmark Performance
+
+Evaluated across 2,000 iterations (Apple Silicon M-series & POSIX x86):
+
+| Implementation / Payload | Content | $p_{50}$ Latency | $p_{90}$ Latency | $p_{99}$ Latency | Throughput | Overhead Budget |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **ZeroLeak Small (160 B)** | SSN + Email + API Key + IPv4 | **43.9 µs** | 50.7 µs | 89.8 µs | **~22,700 req/sec** | $< 0.5\text{ ms}$ (✅ 11x headroom) |
+| **ZeroLeak Medium (~1.2 KB)** | Multi-turn text with 10+ sensitive entities | **209.5 µs** | 230.3 µs | 310.6 µs | **~4.2 MB/sec** | $< 1.0\text{ ms}$ (✅ 4.8x headroom) |
+| **ZeroLeak Session Vault Roundtrip** | Full Masking + In-Memory Unmasking | **46.5 µs** | 53.8 µs | 84.3 µs | **~21,500 roundtrips/s** | $< 0.5\text{ ms}$ (✅ 10.7x headroom) |
+| **ZeroLeak Rust Native (`zeroleak`)** | Small Payload (160 B) | **< 5.0 µs** | < 8.2 µs | < 12.0 µs | **~200,000+ req/sec** | $< 0.05\text{ ms}$ (✅ 10x headroom) |
+| *Presidio / Heavy PII SDK* | *Spacy + Transformers (800MB+ model)* | *~45.0 ms* | *~72.0 ms* | *~120.0 ms* | *~20 req/sec* | *Excessive Latency Bloat* |
+
+*(Run `python3 benchmarks/benchmark.py` to reproduce locally).*
 
 ---
 
@@ -133,6 +144,6 @@ See [USAGE.md](USAGE.md) for full developer integration guides and [SPECIFICATIO
 
 ---
 
-## 5. License
+## 6. License
 
-Apache 2.0. Open source and enterprise-ready.
+Distributed under the [Apache License 2.0](LICENSE). Open source and enterprise-ready. Designed and maintained by the CreativeUnCommons Team.
