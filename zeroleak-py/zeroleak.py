@@ -430,6 +430,14 @@ class SessionVault:
             session_tokens = self._token_map.get(trace_id, {})
             return list(session_tokens.values())
 
+    def touch(self, trace_id: str) -> bool:
+        """Refreshes the sliding TTL timestamp for an active session."""
+        with self._lock:
+            if trace_id in self._session_created:
+                self._session_created[trace_id] = time.time()
+                return True
+            return False
+
     def purge(self, trace_id: str) -> bool:
         """Explicitly wipes a session from memory immediately."""
         with self._lock:
@@ -824,16 +832,18 @@ class ZeroLeak:
         if not session_entries:
             return text
 
-        table = {e.token: e.raw_value for e in session_entries}
+        self.vault.touch(trace_id)
+        entry_map = {e.token: e for e in session_entries}
         restituted_count = 0
 
         def _replace(match: re.Match) -> str:
             nonlocal restituted_count
             tok = match.group(0)
-            val = table.get(tok)
-            if val is not None:
+            entry = entry_map.get(tok)
+            if entry is not None:
+                entry.touch()
                 restituted_count += 1
-                return val
+                return entry.raw_value
             return tok
 
         restituted_text = _TOKEN_RE.sub(_replace, text)
@@ -846,6 +856,10 @@ class ZeroLeak:
                 receipt.duration_ms += (time.perf_counter() - t0) * 1000.0
 
         return restituted_text
+
+    def touch(self, trace_id: str) -> bool:
+        """Refreshes the in-memory sliding TTL for a given session."""
+        return self.vault.touch(trace_id)
 
     def mask_object(self, obj: Any, trace_id: Optional[str] = None, _depth: int = 0) -> Any:
         """Recursively masks strings and dict keys inside arbitrary dicts, lists, or primitives."""
